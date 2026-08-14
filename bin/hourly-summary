@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+umask 027
+. /etc/ollama-cloud-monitor.env
+export OLLAMA_API_KEY MONITOR_DATA_DIR
+cd /home/dev/ollama-cloud-monitor
+exec /home/dev/ollama-cloud-monitor/.venv/bin/python monitor.py summarize

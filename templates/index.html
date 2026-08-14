@@ -27,6 +27,19 @@
     .value { font-size:34px; font-weight:750; letter-spacing:-.04em; margin:14px 0 2px; }
     .unit,.detail { color:var(--muted); font-size:13px; }
     .error { color:#fca5a5; font-size:13px; margin-top:12px; overflow-wrap:anywhere; }
+    .insights { margin-top:18px; padding:18px; background:linear-gradient(145deg,#141d2e,#0f1725); border:1px solid var(--line); border-radius:15px; box-shadow:0 14px 35px #0004; }
+    .insights-head { display:flex; align-items:flex-end; justify-content:space-between; gap:18px; margin-bottom:13px; }
+    .insights-head p { color:var(--muted); margin:3px 0 0; font-size:13px; }
+    .ai-badge { flex:none; color:#bbf7d0; border:1px solid #166534; background:#052e1a; border-radius:999px; padding:5px 10px; font-size:12px; }
+    .feed { display:flex; flex-direction:column; max-height:620px; overflow-y:auto; border-top:1px solid #263247; scrollbar-color:#475569 transparent; }
+    .insight { display:grid; grid-template-columns:190px 1fr; gap:18px; padding:17px 3px; border-bottom:1px solid #263247; }
+    .insight:last-child { border-bottom:0; }
+    .insight-time { color:#cbd5e1; font-size:12px; font-weight:650; }
+    .insight-window { color:#64748b; font-size:11px; margin-top:5px; }
+    .insight p { margin:0; color:#dbe4f0; line-height:1.65; }
+    .feed-empty { color:var(--muted); padding:22px 3px 8px; }
+    .feed-link { color:#86efac; font-size:12px; text-decoration:none; }
+    .feed-link:hover { text-decoration:underline; }
     .chart { margin-top:18px; padding:16px; }
     .chart-head { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:2px 3px 14px; }
     h2 { margin:0; font-size:18px; }
@@ -37,7 +50,7 @@
     footer { display:flex; justify-content:space-between; gap:20px; color:#64748b; font-size:12px; margin-top:16px; padding:0 4px; }
     footer a { color:#94a3b8; }
     @media (max-width:850px) { .cards { grid-template-columns:repeat(2,1fr); } }
-    @media (max-width:560px) { main { width:min(100% - 20px,1240px); padding-top:24px; } header,.chart-head,footer { align-items:flex-start; flex-direction:column; } .cards { grid-template-columns:1fr; } .badge { align-self:flex-start; } .chart { padding:9px; overflow-x:auto; } .graph { width:1080px; max-width:none; } }
+    @media (max-width:560px) { main { width:min(100% - 20px,1240px); padding-top:24px; } header,.chart-head,.insights-head,footer { align-items:flex-start; flex-direction:column; } .cards { grid-template-columns:1fr; } .badge { align-self:flex-start; } .insights { padding:14px; } .insight { grid-template-columns:1fr; gap:7px; } .chart { padding:9px; overflow-x:auto; } .graph { width:1080px; max-width:none; } }
   </style>
 </head>
 <body>
@@ -70,6 +83,32 @@
     </article>
     </a>
     {% endfor %}
+  </section>
+
+  <section class="insights" aria-labelledby="insights-heading">
+    <div class="insights-head">
+      <div>
+        <h2 id="insights-heading">Hourly performance insights</h2>
+        <p>GLM-5.2 analysis of the rolling four-hour, five-minute dataset</p>
+      </div>
+      <span class="ai-badge">AI-generated · hourly</span>
+    </div>
+    {% if summaries %}
+    <div class="feed" role="feed" aria-label="Performance summary history">
+      {% for item in summaries %}
+      <article class="insight" aria-posinset="{{ loop.index }}" aria-setsize="{{ summaries|length }}">
+        <div>
+          <time class="insight-time" datetime="{{ item.generated_at }}">{{ item.generated_label }}</time>
+          <div class="insight-window" title="{{ item.period_label }}">4-hour window · {{ item.valid_point_count }} points · {{ '%.1f'|format(item.coverage_pct) }}% coverage</div>
+        </div>
+        <p>{{ item.summary }}</p>
+      </article>
+      {% endfor %}
+    </div>
+    <a class="feed-link" href="{{ url_for('api_summaries') }}">JSON summary history</a>
+    {% else %}
+    <div class="feed-empty">The first four-hour analysis is waiting to run.</div>
+    {% endif %}
   </section>
 
   {% for period, period_data in periods.items() %}

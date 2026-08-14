@@ -7,6 +7,7 @@ import fcntl
 import json
 import math
 import os
+import sqlite3
 import subprocess
 import statistics
 import tempfile
@@ -25,7 +26,9 @@ DATA_DIR = Path(os.environ.get("MONITOR_DATA_DIR", BASE_DIR / "data"))
 RRD_PATH = DATA_DIR / "ollama_cloud.rrd"
 STATUS_PATH = DATA_DIR / "status.json"
 MODEL_INFO_PATH = DATA_DIR / "model_info.json"
+SUMMARY_DB_PATH = DATA_DIR / "summaries.sqlite3"
 LOCK_PATH = DATA_DIR / "probe.lock"
+SUMMARY_LOCK_PATH = DATA_DIR / "summary.lock"
 API_BASE = os.environ.get("OLLAMA_API_BASE", "https://ollama.com").rstrip("/")
 
 MODELS = [
@@ -44,6 +47,9 @@ PERIODS = {
     "30d": ("end-30d", "Last 30 days"),
 }
 PERIOD_SECONDS = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000}
+SUMMARY_MODEL = "glm-5.2"
+SUMMARY_WINDOW_SECONDS = 4 * 60 * 60
+SUMMARY_EXPECTED_SAMPLES = SUMMARY_WINDOW_SECONDS // 300
 
 PROMPT = (
     "In 100 to 120 words, explain why reproducible performance benchmarks "
@@ -100,6 +106,18 @@ def probe_lock() -> Iterator[None]:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise click.ClickException("another probe is already running") from exc
+        yield
+
+
+@contextmanager
+def summary_lock() -> Iterator[None]:
+    """Prevent overlapping scheduled and manual summary generation."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with SUMMARY_LOCK_PATH.open("w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise click.ClickException("another summary generation is already running") from exc
         yield
 
 
@@ -427,6 +445,267 @@ def get_model_stats(model_ds: str) -> list[dict[str, Any]]:
     return [calculate_period_stats(model_ds, period) for period in PERIODS]
 
 
+def fetch_summary_snapshot() -> dict[str, Any]:
+    """Fetch aligned five-minute values for all models over the last four hours."""
+    ensure_rrd()
+    period_end = int(time.time())
+    period_start = period_end - SUMMARY_WINDOW_SECONDS
+    output = run_rrd(
+        "fetch",
+        str(RRD_PATH),
+        "AVERAGE",
+        "--start",
+        str(period_start),
+        "--end",
+        str(period_end),
+        "--resolution",
+        "300",
+        capture=True,
+    ).stdout.decode(errors="replace")
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("RRDtool returned no data")
+    columns = lines[0].split()
+    rows: list[tuple[int, list[str]]] = []
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        raw_timestamp, raw_values = line.split(":", 1)
+        try:
+            timestamp = int(raw_timestamp.strip())
+        except ValueError:
+            continue
+        if period_start <= timestamp <= period_end:
+            rows.append((timestamp, raw_values.split()))
+
+    model_data: dict[str, dict[str, Any]] = {}
+    valid_point_count = 0
+    for model in MODELS:
+        try:
+            model_index = columns.index(model["ds"])
+        except ValueError as exc:
+            raise RuntimeError(f"RRD data source not found: {model['ds']}") from exc
+        points: list[dict[str, Any]] = []
+        values: list[float] = []
+        for timestamp, fields in rows:
+            if model_index >= len(fields):
+                continue
+            try:
+                value = float(fields[model_index])
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value < 0:
+                continue
+            rounded = round(value, 2)
+            values.append(value)
+            points.append(
+                {
+                    "time_utc": datetime.fromtimestamp(timestamp, timezone.utc).strftime("%H:%M"),
+                    "tps": rounded,
+                }
+            )
+        valid_point_count += len(values)
+        if not values:
+            model_data[model["name"]] = {
+                "sample_count": 0,
+                "expected_samples": SUMMARY_EXPECTED_SAMPLES,
+                "coverage_pct": 0.0,
+                "points": [],
+            }
+            continue
+        midpoint = max(1, len(values) // 2)
+        first_half = statistics.fmean(values[:midpoint])
+        second_half = statistics.fmean(values[midpoint:]) if values[midpoint:] else values[-1]
+        deviation = statistics.pstdev(values) if len(values) > 1 else 0.0
+        model_data[model["name"]] = {
+            "sample_count": len(values),
+            "expected_samples": SUMMARY_EXPECTED_SAMPLES,
+            "coverage_pct": round(min(100.0, len(values) / SUMMARY_EXPECTED_SAMPLES * 100), 1),
+            "latest_tps": round(values[-1], 2),
+            "average_tps": round(statistics.fmean(values), 2),
+            "minimum_tps": round(min(values), 2),
+            "maximum_tps": round(max(values), 2),
+            "p95_tps": round(percentile(values, 0.95) or 0, 2),
+            "stddev_tps": round(deviation, 2),
+            "cv_pct": round(deviation / statistics.fmean(values) * 100, 1),
+            "trend_pct": round((second_half - first_half) / first_half * 100, 1) if first_half > 0 else None,
+            "points": points,
+        }
+
+    if valid_point_count == 0:
+        raise RuntimeError("no valid performance points exist in the last four hours")
+    return {
+        "period_start": datetime.fromtimestamp(period_start, timezone.utc).isoformat(),
+        "period_end": datetime.fromtimestamp(period_end, timezone.utc).isoformat(),
+        "interval_minutes": 5,
+        "expected_samples_per_model": SUMMARY_EXPECTED_SAMPLES,
+        "valid_point_count": valid_point_count,
+        "coverage_pct": round(
+            min(100.0, valid_point_count / (SUMMARY_EXPECTED_SAMPLES * len(MODELS)) * 100), 1
+        ),
+        "models": model_data,
+    }
+
+
+def summary_prompt(snapshot: dict[str, Any]) -> str:
+    """Build a compact, data-grounded instruction for the analyst model."""
+    return (
+        "You are an operations analyst reviewing Ollama Cloud output-token throughput. "
+        "Using only the supplied rolling four-hour dataset, write one concise, useful plain-text "
+        "summary of 70 to 120 words. Mention the strongest and weakest model based on average "
+        "throughput, the most operationally significant trend or volatility, and any missing-data "
+        "limitation. Include useful numbers with token/s units. Do not add a title, bullet list, "
+        "markdown, generic benchmarking advice, unsupported explanations, or claims of statistical "
+        "significance. Check every sample-count and percentage statement directly against the JSON. "
+        "Do not mention analysis instructions or sample thresholds. The points arrays are ordered "
+        "five-minute observations in UTC and the calculated fields are provided for verification.\n\n"
+        f"DATASET:\n{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+
+
+def init_summary_db() -> None:
+    """Initialize durable hourly-summary history."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(SUMMARY_DB_PATH, timeout=15) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=15000")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generated_at TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                model TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                valid_point_count INTEGER NOT NULL,
+                coverage_pct REAL NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                prompt_eval_count INTEGER,
+                eval_count INTEGER,
+                total_duration_ns INTEGER,
+                wall_seconds REAL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS summaries_generated_at_idx ON summaries(generated_at DESC)"
+        )
+
+
+def save_summary(snapshot: dict[str, Any], text: str, payload: dict[str, Any], wall_seconds: float) -> int:
+    """Persist one generated insight and its aggregate source snapshot."""
+    init_summary_db()
+    aggregate_snapshot = {
+        **{key: value for key, value in snapshot.items() if key != "models"},
+        "models": {
+            name: {key: value for key, value in data.items() if key != "points"}
+            for name, data in snapshot["models"].items()
+        },
+    }
+    with sqlite3.connect(SUMMARY_DB_PATH, timeout=15) as connection:
+        connection.execute("PRAGMA busy_timeout=15000")
+        cursor = connection.execute(
+            """
+            INSERT INTO summaries (
+                generated_at, period_start, period_end, model, summary,
+                valid_point_count, coverage_pct, snapshot_json,
+                prompt_eval_count, eval_count, total_duration_ns, wall_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                snapshot["period_start"],
+                snapshot["period_end"],
+                SUMMARY_MODEL,
+                text,
+                snapshot["valid_point_count"],
+                snapshot["coverage_pct"],
+                json.dumps(aggregate_snapshot, separators=(",", ":")),
+                payload.get("prompt_eval_count"),
+                payload.get("eval_count"),
+                payload.get("total_duration"),
+                round(wall_seconds, 3),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def format_utc_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc).strftime("%b %d, %Y · %H:%M UTC")
+    except (TypeError, ValueError):
+        return value
+
+
+def list_summaries(limit: int = 24) -> list[dict[str, Any]]:
+    """Read newest summary history for the web feed or CLI."""
+    init_summary_db()
+    safe_limit = max(1, min(int(limit), 500))
+    with sqlite3.connect(SUMMARY_DB_PATH, timeout=15) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=15000")
+        rows = connection.execute(
+            """
+            SELECT id, generated_at, period_start, period_end, model, summary,
+                   valid_point_count, coverage_pct, prompt_eval_count,
+                   eval_count, total_duration_ns, wall_seconds
+            FROM summaries ORDER BY id DESC LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    items = [dict(row) for row in rows]
+    for item in items:
+        item["generated_label"] = format_utc_timestamp(item["generated_at"])
+        item["period_label"] = (
+            f"{format_utc_timestamp(item['period_start'])} to "
+            f"{format_utc_timestamp(item['period_end'])}"
+        )
+    return items
+
+
+def generate_hourly_summary() -> dict[str, Any]:
+    """Ask GLM-5.2 to summarize the rolling four-hour RRD dataset."""
+    api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if not api_key:
+        raise click.ClickException("OLLAMA_API_KEY is not set")
+    with summary_lock():
+        snapshot = fetch_summary_snapshot()
+        started = time.monotonic()
+        response = requests.post(
+            f"{API_BASE}/api/generate",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": SUMMARY_MODEL,
+                "prompt": summary_prompt(snapshot),
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.2, "num_predict": 300},
+            },
+            timeout=(20, 900),
+        )
+        wall_seconds = time.monotonic() - started
+        if not response.ok:
+            body = response.text.replace("\n", " ").strip()[:500]
+            raise RuntimeError(f"Ollama summary HTTP {response.status_code}: {body or response.reason}")
+        payload = response.json()
+        text = str(payload.get("response") or "").strip()
+        if not text:
+            raise RuntimeError("GLM-5.2 returned an empty summary")
+        # Bound accidental verbosity while preserving the model's complete concise response.
+        text = text[:3000]
+        summary_id = save_summary(snapshot, text, payload, wall_seconds)
+        return {
+            "id": summary_id,
+            "model": SUMMARY_MODEL,
+            "summary": text,
+            "valid_point_count": snapshot["valid_point_count"],
+            "coverage_pct": snapshot["coverage_pct"],
+            "wall_seconds": round(wall_seconds, 3),
+        }
+
+
 def make_graph(period: str, selected_ds: str | None = None) -> bytes:
     """Render a PNG through RRDtool's rrdgraph implementation."""
     if period not in PERIODS:
@@ -514,9 +793,11 @@ def create_app() -> Flask:
         for model in MODELS:
             display_models.append({**model, **status.get("models", {}).get(model["name"], {})})
         cache_key = int(STATUS_PATH.stat().st_mtime) if STATUS_PATH.exists() else 0
+        summary_feed = list_summaries(24)
         return render_template(
             "index.html",
             models=display_models,
+            summaries=summary_feed,
             status=status,
             updated=updated,
             cache_key=cache_key,
@@ -583,13 +864,17 @@ def create_app() -> Flask:
             headers={"Cache-Control": "public, max-age=300"},
         )
 
+    @app.get("/api/summaries")
+    def api_summaries() -> Response:
+        return jsonify({"summaries": list_summaries(100)})
+
     @app.get("/api/status")
     def api_status() -> Response:
         return jsonify(load_status())
 
     @app.get("/healthz")
     def healthz() -> Response:
-        return jsonify({"ok": True, "rrd": RRD_PATH.exists()})
+        return jsonify({"ok": True, "rrd": RRD_PATH.exists(), "summary_db": SUMMARY_DB_PATH.exists()})
 
     return app
 
@@ -627,6 +912,24 @@ def refresh_info_command() -> None:
     click.echo(f"Model information refreshed: {success_count} cached, {error_count} errors")
     if success_count == 0:
         raise click.ClickException("no model information could be fetched")
+
+
+@cli.command("summarize")
+def summarize_command() -> None:
+    """Generate and save a GLM-5.2 summary of the last four hours."""
+    result = generate_hourly_summary()
+    click.echo(
+        f"Saved summary {result['id']} from {result['valid_point_count']} points "
+        f"({result['coverage_pct']:.1f}% coverage)"
+    )
+    click.echo(result["summary"])
+
+
+@cli.command("summary-history")
+@click.option("--limit", default=10, type=click.IntRange(1, 500), show_default=True)
+def summary_history_command(limit: int) -> None:
+    """Print saved AI summary history as JSON."""
+    click.echo(json.dumps(list_summaries(limit), indent=2))
 
 
 @cli.command("graph")

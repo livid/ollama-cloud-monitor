@@ -25,3 +25,14 @@ Each dashboard card links to `/model/<model-id>`, which shows 24-hour, 7-day, an
 ## Model information
 
 Model detail pages display architecture, parameter count, quantization, context window, and capabilities from Ollama's authenticated `/api/show` endpoint. Only these basic non-sensitive fields are cached in `data/model_info.json`; scheduled probes refresh metadata when the cache is more than 24 hours old. Run `.venv/bin/python monitor.py refresh-info` for an immediate refresh.
+
+## Hourly AI insight feed
+
+At minute 3 of every hour, `bin/hourly-summary` fetches the previous four hours of five-minute RRD samples for all six models and asks Ollama Cloud `glm-5.2` for a concise, data-grounded operational summary. Summaries and aggregate source metadata are retained in `data/summaries.sqlite3`; the dashboard displays the newest 24 entries and `/api/summaries` returns the newest 100.
+
+Manual commands:
+
+```bash
+.venv/bin/python monitor.py summarize
+.venv/bin/python monitor.py summary-history --limit 10
+```

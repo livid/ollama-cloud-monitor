@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""Ollama Cloud performance monitor, CLI, and Flask application."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import math
+import os
+import subprocess
+import statistics
+import tempfile
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator
+
+import click
+import requests
+from flask import Flask, Response, abort, jsonify, render_template
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("MONITOR_DATA_DIR", BASE_DIR / "data"))
+RRD_PATH = DATA_DIR / "ollama_cloud.rrd"
+STATUS_PATH = DATA_DIR / "status.json"
+MODEL_INFO_PATH = DATA_DIR / "model_info.json"
+LOCK_PATH = DATA_DIR / "probe.lock"
+API_BASE = os.environ.get("OLLAMA_API_BASE", "https://ollama.com").rstrip("/")
+
+MODELS = [
+    {"name": "gemma4:31b", "ds": "gemma4_31b", "color": "7C3AED"},
+    {"name": "minimax-m3", "ds": "minimax_m3", "color": "06B6D4"},
+    {"name": "glm-5.2", "ds": "glm_5_2", "color": "22C55E"},
+    {"name": "deepseek-v4-pro", "ds": "dsv4_pro", "color": "F59E0B"},
+    {"name": "deepseek-v4-flash", "ds": "dsv4_flash", "color": "EF4444"},
+    {"name": "nemotron-3-ultra", "ds": "nemotron3", "color": "EC4899"},
+]
+MODEL_BY_NAME = {item["name"]: item for item in MODELS}
+
+PERIODS = {
+    "24h": ("end-24h", "Last 24 hours"),
+    "7d": ("end-7d", "Last 7 days"),
+    "30d": ("end-30d", "Last 30 days"),
+}
+PERIOD_SECONDS = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000}
+
+PROMPT = (
+    "In 100 to 120 words, explain why reproducible performance benchmarks "
+    "are useful. Return plain prose only, with no heading or bullet list."
+)
+
+
+def run_rrd(*args: str, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
+    """Run rrdtool with a predictable locale."""
+    env = {**os.environ, "LC_ALL": "C"}
+    return subprocess.run(
+        ["/usr/bin/rrdtool", *args],
+        check=True,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+
+
+def ensure_rrd() -> None:
+    """Create the five-minute-step round-robin database if it does not exist."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if RRD_PATH.exists():
+        return
+
+    args = ["create", str(RRD_PATH), "--step", "300", "--start", "now-10s"]
+    args.extend(
+        f"DS:{model['ds']}:GAUGE:900:0:U" for model in MODELS
+    )
+    # Five-minute detail for 31 days, hourly averages for a year,
+    # six-hour averages for a year, and daily averages for two years.
+    args.extend(
+        [
+            "RRA:LAST:0.5:1:8928",
+            "RRA:AVERAGE:0.5:1:8928",
+            "RRA:MAX:0.5:1:8928",
+            "RRA:AVERAGE:0.5:12:8784",
+            "RRA:MAX:0.5:12:8784",
+            "RRA:AVERAGE:0.5:72:1464",
+            "RRA:MAX:0.5:72:1464",
+            "RRA:AVERAGE:0.5:288:732",
+            "RRA:MAX:0.5:288:732",
+        ]
+    )
+    run_rrd(*args)
+
+
+@contextmanager
+def probe_lock() -> Iterator[None]:
+    """Prevent overlapping manual and cron probes."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with LOCK_PATH.open("w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise click.ClickException("another probe is already running") from exc
+        yield
+
+
+def measure_model(session: requests.Session, model_name: str, api_key: str) -> dict[str, Any]:
+    """Call Ollama Cloud and calculate server-reported output token throughput."""
+    started = time.monotonic()
+    response = session.post(
+        f"{API_BASE}/api/generate",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model_name,
+            "prompt": PROMPT,
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 160},
+        },
+        timeout=(20, 900),
+    )
+    wall_seconds = time.monotonic() - started
+
+    if not response.ok:
+        body = response.text.replace("\n", " ").strip()[:300]
+        raise RuntimeError(f"HTTP {response.status_code}: {body or response.reason}")
+
+    payload = response.json()
+    eval_count = int(payload.get("eval_count") or 0)
+    eval_duration_ns = int(payload.get("eval_duration") or 0)
+    total_duration_ns = int(payload.get("total_duration") or 0)
+    # Local Ollama reports eval_duration; Ollama Cloud currently omits it but
+    # provides total_duration. In that case, use server-side end-to-end time,
+    # which includes prompt processing but excludes client network overhead.
+    metric_duration_ns = eval_duration_ns or total_duration_ns
+    metric_source = "eval_duration" if eval_duration_ns else "total_duration"
+    if eval_count <= 0 or metric_duration_ns <= 0:
+        raise RuntimeError("Ollama response did not include usable token/duration metrics")
+
+    tps = eval_count * 1_000_000_000 / metric_duration_ns
+    return {
+        "tps": round(tps, 3),
+        "eval_count": eval_count,
+        "metric_seconds": round(metric_duration_ns / 1_000_000_000, 3),
+        "metric_source": metric_source,
+        "wall_seconds": round(wall_seconds, 3),
+        "done_reason": payload.get("done_reason", "stop"),
+    }
+
+
+def format_parameter_count(value: Any) -> str | None:
+    """Format an exact API parameter count as a compact human label."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    if count >= 1_000_000_000:
+        amount = f"{count / 1_000_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{amount}B parameters"
+    if count >= 1_000_000:
+        amount = f"{count / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{amount}M parameters"
+    return f"{count:,} parameters"
+
+
+def model_info_value(model_info: dict[str, Any], suffix: str) -> Any:
+    """Find architecture-prefixed fields such as *.context_length."""
+    return next((value for key, value in model_info.items() if key.endswith(suffix)), None)
+
+
+def normalize_model_info(model_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep only useful, non-sensitive fields from Ollama /api/show."""
+    details = payload.get("details") or {}
+    raw_info = payload.get("model_info") or {}
+    parameter_count = details.get("parameter_size") or raw_info.get("general.parameter_count")
+    context_length = model_info_value(raw_info, ".context_length")
+    embedding_length = model_info_value(raw_info, ".embedding_length")
+    return {
+        "name": model_name,
+        "architecture": raw_info.get("general.architecture") or details.get("family"),
+        "family": details.get("family"),
+        "parameter_count": int(parameter_count) if str(parameter_count).isdigit() and int(parameter_count) > 0 else None,
+        "parameter_label": format_parameter_count(parameter_count),
+        "quantization": details.get("quantization_level") or raw_info.get("general.quantization_version"),
+        "context_length": int(context_length) if context_length is not None else None,
+        "embedding_length": int(embedding_length) if embedding_length is not None else None,
+        "format": details.get("format") or None,
+        "capabilities": payload.get("capabilities") or [],
+        "modified_at": payload.get("modified_at"),
+    }
+
+
+def write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write JSON in the monitor data directory."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f"{path.stem}.", suffix=".json", dir=DATA_DIR)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def load_model_info() -> dict[str, Any]:
+    if not MODEL_INFO_PATH.exists():
+        return {"models": {}}
+    try:
+        return json.loads(MODEL_INFO_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"models": {}}
+
+
+def model_info_is_stale(max_age_seconds: int = 86_400) -> bool:
+    return not MODEL_INFO_PATH.exists() or time.time() - MODEL_INFO_PATH.stat().st_mtime > max_age_seconds
+
+
+def refresh_model_info(api_key: str, session: requests.Session | None = None) -> dict[str, Any]:
+    """Refresh the cached model basics using Ollama's /api/show endpoint."""
+    owned_session = session is None
+    session = session or requests.Session()
+    existing = load_model_info().get("models", {})
+    models = dict(existing)
+    errors: dict[str, str] = {}
+    try:
+        for model in MODELS:
+            name = model["name"]
+            try:
+                response = session.post(
+                    f"{API_BASE}/api/show",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"model": name},
+                    timeout=(20, 120),
+                )
+                if not response.ok:
+                    body = response.text.replace("\n", " ").strip()[:300]
+                    raise RuntimeError(f"HTTP {response.status_code}: {body or response.reason}")
+                models[name] = normalize_model_info(name, response.json())
+            except Exception as exc:
+                errors[name] = str(exc)[:500]
+    finally:
+        if owned_session:
+            session.close()
+
+    cache = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "models": models,
+        "errors": errors,
+    }
+    write_json_file(MODEL_INFO_PATH, cache)
+    return cache
+
+
+def write_status(status: dict[str, Any]) -> None:
+    """Atomically publish dashboard status."""
+    write_json_file(STATUS_PATH, status)
+
+
+def load_status() -> dict[str, Any]:
+    if not STATUS_PATH.exists():
+        return {"state": "waiting", "models": {}}
+    try:
+        return json.loads(STATUS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"state": "error", "models": {}, "error": "status file is unavailable"}
+
+
+def update_rrd(results: dict[str, dict[str, Any]]) -> int:
+    """Store one timestamp containing a value (or unknown) for every model."""
+    ensure_rrd()
+    now = int(time.time())
+    last = int(run_rrd("last", str(RRD_PATH), capture=True).stdout.decode().strip())
+    timestamp = max(now, last + 1)
+    values = []
+    for model in MODELS:
+        result = results.get(model["name"], {})
+        value = result.get("tps")
+        values.append("U" if value is None else f"{float(value):.6f}")
+    run_rrd("update", str(RRD_PATH), f"{timestamp}:{':'.join(values)}")
+    return timestamp
+
+
+def perform_probe() -> dict[str, Any]:
+    api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if not api_key:
+        raise click.ClickException("OLLAMA_API_KEY is not set")
+
+    ensure_rrd()
+    started_at = datetime.now(timezone.utc)
+    results: dict[str, dict[str, Any]] = {}
+    with probe_lock(), requests.Session() as session:
+        if model_info_is_stale():
+            click.echo("Refreshing Ollama model information ...")
+            info_cache = refresh_model_info(api_key, session)
+            if info_cache.get("errors"):
+                click.echo(f"Model information warnings: {len(info_cache['errors'])}")
+        for model in MODELS:
+            name = model["name"]
+            click.echo(f"Testing {name} ... ", nl=False)
+            try:
+                result = measure_model(session, name, api_key)
+                result["ok"] = True
+                results[name] = result
+                click.echo(f"{result['tps']:.2f} token/s")
+            except Exception as exc:  # Continue so one unavailable model cannot stop the run.
+                results[name] = {"ok": False, "tps": None, "error": str(exc)[:500]}
+                click.echo(f"ERROR: {exc}")
+
+        rrd_timestamp = update_rrd(results)
+        finished_at = datetime.now(timezone.utc)
+        success_count = sum(1 for item in results.values() if item.get("ok"))
+        status = {
+            "state": "ok" if success_count == len(MODELS) else "partial",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
+            "rrd_timestamp": rrd_timestamp,
+            "success_count": success_count,
+            "model_count": len(MODELS),
+            "models": results,
+        }
+        write_status(status)
+    return status
+
+
+def percentile(values: list[float], percentile_value: float) -> float | None:
+    """Return an interpolated percentile for a non-empty sample."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile_value
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+
+
+def fetch_model_values(model_ds: str, period: str) -> list[float]:
+    """Fetch finite five-minute AVERAGE values for one model from RRDtool."""
+    if model_ds not in {model["ds"] for model in MODELS} or period not in PERIODS:
+        raise ValueError("invalid model or period")
+    ensure_rrd()
+    output = run_rrd(
+        "fetch",
+        str(RRD_PATH),
+        "AVERAGE",
+        "--start",
+        PERIODS[period][0],
+        "--end",
+        "now",
+        "--resolution",
+        "300",
+        capture=True,
+    ).stdout.decode(errors="replace")
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return []
+    columns = lines[0].split()
+    try:
+        model_index = columns.index(model_ds)
+    except ValueError as exc:
+        raise RuntimeError(f"RRD data source not found: {model_ds}") from exc
+
+    values: list[float] = []
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        fields = line.split(":", 1)[1].split()
+        if model_index >= len(fields):
+            continue
+        try:
+            value = float(fields[model_index])
+        except ValueError:
+            continue
+        if math.isfinite(value) and value >= 0:
+            values.append(value)
+    return values
+
+
+def calculate_period_stats(model_ds: str, period: str) -> dict[str, Any]:
+    """Calculate descriptive and operational statistics for a graph range."""
+    values = fetch_model_values(model_ds, period)
+    expected_samples = PERIOD_SECONDS[period] // 300
+    count = len(values)
+    if not values:
+        return {
+            "period": period,
+            "label": PERIODS[period][1],
+            "count": 0,
+            "expected_samples": expected_samples,
+            "coverage_pct": 0.0,
+        }
+
+    average = statistics.fmean(values)
+    deviation = statistics.pstdev(values) if count > 1 else 0.0
+    midpoint = max(1, count // 2)
+    earlier = statistics.fmean(values[:midpoint])
+    later = statistics.fmean(values[midpoint:]) if values[midpoint:] else values[-1]
+    trend_pct = ((later - earlier) / earlier * 100) if earlier > 0 else None
+    return {
+        "period": period,
+        "label": PERIODS[period][1],
+        "latest": values[-1],
+        "average": average,
+        "minimum": min(values),
+        "p05": percentile(values, 0.05),
+        "median": percentile(values, 0.50),
+        "p95": percentile(values, 0.95),
+        "maximum": max(values),
+        "range": max(values) - min(values),
+        "stddev": deviation,
+        "cv_pct": (deviation / average * 100) if average > 0 else None,
+        "trend_pct": trend_pct,
+        "count": count,
+        "expected_samples": expected_samples,
+        "coverage_pct": min(100.0, count / expected_samples * 100),
+    }
+
+
+def get_model_stats(model_ds: str) -> list[dict[str, Any]]:
+    """Return statistics ordered to match the dashboard graph ranges."""
+    return [calculate_period_stats(model_ds, period) for period in PERIODS]
+
+
+def make_graph(period: str, selected_ds: str | None = None) -> bytes:
+    """Render a PNG through RRDtool's rrdgraph implementation."""
+    if period not in PERIODS:
+        raise ValueError("invalid graph period")
+    graph_models = MODELS
+    if selected_ds is not None:
+        graph_models = [model for model in MODELS if model["ds"] == selected_ds]
+        if not graph_models:
+            raise ValueError("invalid model")
+    ensure_rrd()
+    start, label = PERIODS[period]
+    graph_title = (
+        f"{graph_models[0]['name']} throughput — {label}"
+        if selected_ds
+        else f"Ollama Cloud throughput — {label}"
+    )
+    args = [
+        "graph",
+        "-",
+        "--imgformat",
+        "PNG",
+        "--start",
+        start,
+        "--end",
+        "now",
+        "--width",
+        "1080",
+        "--height",
+        "360",
+        "--title",
+        graph_title,
+        "--vertical-label",
+        "output tokens / second",
+        "--lower-limit",
+        "0",
+        "--alt-autoscale-max",
+        "--slope-mode",
+        "--border",
+        "0",
+        "--font",
+        "DEFAULT:0:DejaVu Sans",
+        "--color",
+        "BACK#111827",
+        "--color",
+        "CANVAS#111827",
+        "--color",
+        "FONT#CBD5E1",
+        "--color",
+        "AXIS#64748B",
+        "--color",
+        "GRID#334155",
+        "--color",
+        "MGRID#475569",
+        "--color",
+        "ARROW#94A3B8",
+        "--color",
+        "SHADEA#111827",
+        "--color",
+        "SHADEB#111827",
+    ]
+    for model in graph_models:
+        args.append(f"DEF:{model['ds']}={RRD_PATH}:{model['ds']}:AVERAGE")
+    for model in graph_models:
+        escaped_name = model["name"].replace(":", r"\:")
+        ds = model["ds"]
+        args.extend(
+            [
+                f"LINE2:{ds}#{model['color']}:{escaped_name}",
+                f"GPRINT:{ds}:LAST:Last\\: %6.1lf",
+                f"GPRINT:{ds}:AVERAGE:Avg\\: %6.1lf",
+                f"GPRINT:{ds}:MAX:Max\\: %6.1lf\\l",
+            ]
+        )
+    return run_rrd(*args, capture=True).stdout
+
+
+def create_app() -> Flask:
+    app = Flask(__name__)
+
+    @app.get("/")
+    def index() -> str:
+        status = load_status()
+        updated = status.get("finished_at")
+        display_models = []
+        for model in MODELS:
+            display_models.append({**model, **status.get("models", {}).get(model["name"], {})})
+        cache_key = int(STATUS_PATH.stat().st_mtime) if STATUS_PATH.exists() else 0
+        return render_template(
+            "index.html",
+            models=display_models,
+            status=status,
+            updated=updated,
+            cache_key=cache_key,
+            periods=PERIODS,
+        )
+
+    @app.get("/model/<model_id>")
+    def model_detail(model_id: str) -> str:
+        model = next((item for item in MODELS if item["ds"] == model_id), None)
+        if model is None:
+            abort(404)
+        status = load_status()
+        display_model = {**model, **status.get("models", {}).get(model["name"], {})}
+        model_info_cache = load_model_info()
+        basic_info = model_info_cache.get("models", {}).get(model["name"], {})
+        cache_key = int(STATUS_PATH.stat().st_mtime) if STATUS_PATH.exists() else 0
+        try:
+            performance_stats = get_model_stats(model["ds"])
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.decode(errors="replace")[:500]
+            app.logger.error("RRD statistics fetch failed: %s", detail)
+            performance_stats = []
+        return render_template(
+            "model.html",
+            model=display_model,
+            model_info=basic_info,
+            model_info_fetched_at=model_info_cache.get("fetched_at"),
+            status=status,
+            stats=performance_stats,
+            updated=status.get("finished_at"),
+            cache_key=cache_key,
+            periods=PERIODS,
+        )
+
+    @app.get("/graph/<period>/<model_id>.png")
+    def model_graph(period: str, model_id: str) -> Response:
+        if period not in PERIODS or not any(item["ds"] == model_id for item in MODELS):
+            return Response("Unknown graph or model\n", status=404, mimetype="text/plain")
+        try:
+            png = make_graph(period, model_id)
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.decode(errors="replace")[:500]
+            app.logger.error("model rrdgraph failed: %s", detail)
+            return Response("Graph unavailable\n", status=503, mimetype="text/plain")
+        return Response(
+            png,
+            mimetype="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    @app.get("/graph/<period>.png")
+    def graph(period: str) -> Response:
+        if period not in PERIODS:
+            return Response("Unknown graph period\n", status=404, mimetype="text/plain")
+        try:
+            png = make_graph(period)
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.decode(errors="replace")[:500]
+            app.logger.error("rrdgraph failed: %s", detail)
+            return Response("Graph unavailable\n", status=503, mimetype="text/plain")
+        return Response(
+            png,
+            mimetype="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    @app.get("/api/status")
+    def api_status() -> Response:
+        return jsonify(load_status())
+
+    @app.get("/healthz")
+    def healthz() -> Response:
+        return jsonify({"ok": True, "rrd": RRD_PATH.exists()})
+
+    return app
+
+
+@click.group()
+def cli() -> None:
+    """Monitor Ollama Cloud output-token throughput."""
+
+
+@cli.command("init-db")
+def init_db_command() -> None:
+    """Create the RRD database."""
+    ensure_rrd()
+    click.echo(f"RRD ready: {RRD_PATH}")
+
+
+@cli.command("probe")
+def probe_command() -> None:
+    """Benchmark every configured model and update the RRD."""
+    status = perform_probe()
+    if status["success_count"] == 0:
+        raise click.ClickException("all model probes failed")
+    click.echo(f"Completed: {status['success_count']}/{status['model_count']} models succeeded")
+
+
+@cli.command("refresh-info")
+def refresh_info_command() -> None:
+    """Fetch and cache basic model information from Ollama /api/show."""
+    api_key = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if not api_key:
+        raise click.ClickException("OLLAMA_API_KEY is not set")
+    cache = refresh_model_info(api_key)
+    success_count = len(cache.get("models", {}))
+    error_count = len(cache.get("errors", {}))
+    click.echo(f"Model information refreshed: {success_count} cached, {error_count} errors")
+    if success_count == 0:
+        raise click.ClickException("no model information could be fetched")
+
+
+@cli.command("graph")
+@click.option("--period", type=click.Choice(list(PERIODS)), default="24h", show_default=True)
+@click.option("--output", type=click.Path(path_type=Path), required=True)
+def graph_command(period: str, output: Path) -> None:
+    """Render an RRD graph to a PNG file."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(make_graph(period))
+    click.echo(f"Wrote {output}")
+
+
+@cli.command("status")
+def status_command() -> None:
+    """Print the latest probe status as JSON."""
+    click.echo(json.dumps(load_status(), indent=2))
+
+
+@cli.command("serve")
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--port", default=8000, type=int, show_default=True)
+def serve_command(host: str, port: int) -> None:
+    """Run Flask's development server (systemd uses Gunicorn)."""
+    create_app().run(host=host, port=port)
+
+
+app = create_app()
+
+if __name__ == "__main__":
+    cli()

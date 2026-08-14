@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data and RRDtool databases
+data/*
+!data/.gitkeep
+*.rrd
+*.log
+
+# Local secrets and environment files
+.env
+.env.*
+.service-env
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store

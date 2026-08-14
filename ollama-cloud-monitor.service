@@ -1,0 +1,25 @@
+[Unit]
+Description=Ollama Cloud Performance Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dev
+Group=dev
+WorkingDirectory=/home/dev/ollama-cloud-monitor
+Environment=PYTHONUNBUFFERED=1
+Environment=MONITOR_DATA_DIR=/home/dev/ollama-cloud-monitor/data
+ExecStart=/home/dev/ollama-cloud-monitor/.venv/bin/gunicorn --workers 2 --threads 2 --timeout 60 --bind 0.0.0.0:8000 --access-logfile - --error-logfile - wsgi:app
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/home/dev/ollama-cloud-monitor/data
+
+[Install]
+WantedBy=multi-user.target

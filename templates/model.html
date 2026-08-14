@@ -67,7 +67,29 @@
     .tabs a:hover { border-color:var(--accent); }
     .graph { display:block; width:100%; height:auto; min-height:170px; border-radius:9px; background:#111827; }
     footer { display:flex; justify-content:space-between; gap:20px; color:#64748b; font-size:12px; margin-top:16px; padding:0 4px; }
-    @media (max-width:650px) { main { width:min(100% - 20px,1240px); padding-top:22px; } header,.chart-head,footer { align-items:flex-start; flex-direction:column; } .summary { width:100%; } .chart { width:100%; min-width:0; padding:9px; overflow:hidden; } .graph { width:100%; max-width:100%; min-height:0; } }
+    @media (max-width:650px) {
+      main { width:min(100% - 20px,1240px); padding-top:22px; }
+      header,.chart-head,footer { align-items:flex-start; flex-direction:column; }
+      .summary { width:100%; }
+      .stats-panel { width:100%; min-width:0; padding:12px 10px 10px; overflow:hidden; }
+      .stats-title { margin-bottom:8px; }
+      .stats-title p { font-size:10px; }
+      .table-wrap { width:100%; max-width:100%; overflow:visible; }
+      table { display:block; width:100%; min-width:0; }
+      thead { display:none; }
+      tbody { display:block; width:100%; }
+      tbody tr { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; width:100%; margin:0 0 9px; padding:6px; border:1px solid #263247; border-radius:10px; background:#0b1220; }
+      tbody tr:last-child { margin-bottom:0; }
+      td { display:block; min-width:0; padding:6px 7px; border:0; border-radius:6px; text-align:left; white-space:normal; overflow-wrap:anywhere; font-size:12px; line-height:1.2; }
+      td::before { content:attr(data-label); display:block; min-height:11px; margin-bottom:3px; color:#64748b; font-size:8px; font-weight:700; line-height:1.1; letter-spacing:.055em; text-transform:uppercase; }
+      td.period-name { grid-column:1/-1; padding:2px 3px 5px; background:transparent; font-size:13px; }
+      td.period-name::before { display:none; }
+      td.no-data { grid-column:1/-1; }
+      td .secondary { margin-top:2px; font-size:9px; }
+      .definitions { font-size:9px; line-height:1.4; }
+      .chart { width:100%; min-width:0; padding:9px; overflow:hidden; }
+      .graph { width:100%; max-width:100%; min-height:0; }
+    }
   </style>
 </head>
 <body>
@@ -130,26 +152,26 @@
         <tbody>
           {% for row in stats %}
           <tr>
-            <td class="period-name">{{ row.label }}</td>
+            <td class="period-name" data-label="Range">{{ row.label }}</td>
             {% if row.count %}
-              <td>{{ '%.1f'|format(row.latest) }}</td>
-              <td>{{ '%.1f'|format(row.average) }}</td>
-              <td>{{ '%.1f'|format(row.minimum) }}</td>
-              <td>{{ '%.1f'|format(row.median) }}</td>
-              <td>{{ '%.1f'|format(row.p95) }}</td>
-              <td>{{ '%.1f'|format(row.maximum) }}</td>
-              <td>{{ '%.1f'|format(row.stddev) }}</td>
-              <td>{{ '%.1f'|format(row.cv_pct) }}%</td>
-              <td class="{{ 'trend-up' if row.trend_pct is not none and row.trend_pct >= 0 else 'trend-down' }}">
+              <td data-label="Latest">{{ '%.1f'|format(row.latest) }}</td>
+              <td data-label="Average">{{ '%.1f'|format(row.average) }}</td>
+              <td data-label="Lowest">{{ '%.1f'|format(row.minimum) }}</td>
+              <td data-label="Median / P50">{{ '%.1f'|format(row.median) }}</td>
+              <td data-label="P95">{{ '%.1f'|format(row.p95) }}</td>
+              <td data-label="Highest">{{ '%.1f'|format(row.maximum) }}</td>
+              <td data-label="Std dev">{{ '%.1f'|format(row.stddev) }}</td>
+              <td data-label="Variability / CV">{{ '%.1f'|format(row.cv_pct) }}%</td>
+              <td data-label="Trend" class="{{ 'trend-up' if row.trend_pct is not none and row.trend_pct >= 0 else 'trend-down' }}">
                 {% if row.trend_pct is not none %}{{ '+' if row.trend_pct >= 0 else '' }}{{ '%.1f'|format(row.trend_pct) }}%{% else %}—{% endif %}
               </td>
-              <td class="coverage {{ 'coverage-low' if row.coverage_pct < 80 else '' }}">{{ row.count }} samples <span class="secondary">{{ '%.1f'|format(row.coverage_pct) }}%</span></td>
+              <td data-label="Data coverage" class="coverage {{ 'coverage-low' if row.coverage_pct < 80 else '' }}">{{ row.count }} samples <span class="secondary">{{ '%.1f'|format(row.coverage_pct) }}%</span></td>
             {% else %}
-              <td colspan="10">No samples in this range yet</td>
+              <td class="no-data" data-label="Status" colspan="10">No samples in this range yet</td>
             {% endif %}
           </tr>
           {% else %}
-          <tr><td colspan="11">Statistics are temporarily unavailable</td></tr>
+          <tr><td class="no-data" data-label="Status" colspan="11">Statistics are temporarily unavailable</td></tr>
           {% endfor %}
         </tbody>
       </table>

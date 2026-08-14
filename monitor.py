@@ -19,7 +19,7 @@ from typing import Any, Iterator
 
 import click
 import requests
-from flask import Flask, Response, abort, jsonify, render_template
+from flask import Flask, Response, abort, jsonify, render_template, request
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("MONITOR_DATA_DIR", BASE_DIR / "data"))
@@ -639,10 +639,11 @@ def format_utc_timestamp(value: str) -> str:
         return value
 
 
-def list_summaries(limit: int = 24) -> list[dict[str, Any]]:
+def list_summaries(limit: int = 24, offset: int = 0) -> list[dict[str, Any]]:
     """Read newest summary history for the web feed or CLI."""
     init_summary_db()
     safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
     with sqlite3.connect(SUMMARY_DB_PATH, timeout=15) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=15000")
@@ -651,9 +652,9 @@ def list_summaries(limit: int = 24) -> list[dict[str, Any]]:
             SELECT id, generated_at, period_start, period_end, model, summary,
                    valid_point_count, coverage_pct, prompt_eval_count,
                    eval_count, total_duration_ns, wall_seconds
-            FROM summaries ORDER BY id DESC LIMIT ?
+            FROM summaries ORDER BY id DESC LIMIT ? OFFSET ?
             """,
-            (safe_limit,),
+            (safe_limit, safe_offset),
         ).fetchall()
     items = [dict(row) for row in rows]
     for item in items:
@@ -663,6 +664,14 @@ def list_summaries(limit: int = 24) -> list[dict[str, Any]]:
             f"{format_utc_timestamp(item['period_end'])}"
         )
     return items
+
+
+def count_summaries() -> int:
+    """Return the number of retained AI summaries."""
+    init_summary_db()
+    with sqlite3.connect(SUMMARY_DB_PATH, timeout=15) as connection:
+        connection.execute("PRAGMA busy_timeout=15000")
+        return int(connection.execute("SELECT COUNT(*) FROM summaries").fetchone()[0])
 
 
 def generate_hourly_summary() -> dict[str, Any]:
@@ -793,7 +802,7 @@ def create_app() -> Flask:
         for model in MODELS:
             display_models.append({**model, **status.get("models", {}).get(model["name"], {})})
         cache_key = int(STATUS_PATH.stat().st_mtime) if STATUS_PATH.exists() else 0
-        summary_feed = list_summaries(24)
+        summary_feed = list_summaries(1)
         return render_template(
             "index.html",
             models=display_models,
@@ -802,6 +811,24 @@ def create_app() -> Flask:
             updated=updated,
             cache_key=cache_key,
             periods=PERIODS,
+        )
+
+    @app.get("/insights")
+    def insights() -> str:
+        per_page = 50
+        page = request.args.get("page", default=1, type=int) or 1
+        page = max(1, page)
+        total = count_summaries()
+        total_pages = max(1, math.ceil(total / per_page))
+        if page > total_pages:
+            abort(404)
+        feed = list_summaries(per_page, (page - 1) * per_page)
+        return render_template(
+            "insights.html",
+            summaries=feed,
+            page=page,
+            total=total,
+            total_pages=total_pages,
         )
 
     @app.get("/model/<model_id>")

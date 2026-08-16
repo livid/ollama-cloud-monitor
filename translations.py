@@ -115,7 +115,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "language.english": "英文",
         "language.chinese": "简体中文",
         "dashboard.subtitle": "每 5 分钟测试一次输出词元吞吐量",
-        "dashboard.models_online": "{online}/{total} 个模型在线",
+        "dashboard.models_online": "{online}/{total} 个模型监控中",
         "dashboard.latest_performance": "最新性能",
         "dashboard.view_model": "查看 {model} 性能图表",
         "metrics.output_tokens_second": "输出词元/秒",

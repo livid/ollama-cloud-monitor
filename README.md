@@ -28,13 +28,14 @@ Model detail pages display architecture, parameter count, quantization, context 
 
 ## Hourly AI insight feed
 
-At minute 3 of every hour, `bin/hourly-summary` fetches the previous four hours of five-minute RRD samples for all six models and asks Ollama Cloud `glm-5.2` for a concise, data-grounded operational summary. Summaries and aggregate source metadata are retained in `data/summaries.sqlite3`; the dashboard displays only the newest entry, `/insights` provides the paginated full feed, and `/api/summaries` returns the newest 100.
+At minute 3 of every hour, `bin/hourly-summary` fetches the previous four hours of five-minute RRD samples for all six models and asks Ollama Cloud `glm-5.2` for a concise, data-grounded English operational summary. The same backend immediately translates that summary into Simplified Chinese, and both versions are saved atomically. Summaries and aggregate source metadata are retained in `data/summaries.sqlite3`; the dashboard displays the version matching the active UI language, `/insights` provides the paginated full feed, and `/api/summaries` returns both versions for the newest 100.
 
 Manual commands:
 
 ```bash
 .venv/bin/python monitor.py summarize
-.venv/bin/python monitor.py summary-history --limit 10
+.venv/bin/python monitor.py summary-history --limit 10 --language zh-CN
+.venv/bin/python monitor.py translate-history
 ```
 
 ## UI languages

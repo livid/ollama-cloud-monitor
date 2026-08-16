@@ -33,6 +33,7 @@ SUMMARY_DB_PATH = DATA_DIR / "summaries.sqlite3"
 LOCK_PATH = DATA_DIR / "probe.lock"
 SUMMARY_LOCK_PATH = DATA_DIR / "summary.lock"
 API_BASE = os.environ.get("OLLAMA_API_BASE", "https://ollama.com").rstrip("/")
+RRD_GRAPH_TIMEZONE = os.environ.get("RRD_GRAPH_TIMEZONE", "America/Los_Angeles")
 
 MODELS = [
     {"name": "gemma4:31b", "ds": "gemma4_31b", "color": "7C3AED"},
@@ -60,9 +61,13 @@ PROMPT = (
 )
 
 
-def run_rrd(*args: str, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
-    """Run rrdtool with a predictable locale."""
+def run_rrd(
+    *args: str, capture: bool = False, timezone_name: str | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    """Run rrdtool with a predictable locale and optional time zone."""
     env = {**os.environ, "LC_ALL": "C"}
+    if timezone_name is not None:
+        env["TZ"] = timezone_name
     return subprocess.run(
         ["/usr/bin/rrdtool", *args],
         check=True,
@@ -1025,7 +1030,9 @@ def make_graph(
                 f"GPRINT:{ds}:MAX:{translate(language, 'chart.legend_maximum')}\\: %6.1lf\\l",
             ]
         )
-    return run_rrd(*args, capture=True).stdout
+    return run_rrd(
+        *args, capture=True, timezone_name=RRD_GRAPH_TIMEZONE
+    ).stdout
 
 
 def create_app() -> Flask:

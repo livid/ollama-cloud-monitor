@@ -1,0 +1,4 @@
+<nav class="language-switcher" aria-label="{{ t('language.label') }}">
+  <a class="language-option {{ 'active' if current_language == 'en' else '' }}" href="{{ language_url('en') }}" lang="en" hreflang="en" {% if current_language == 'en' %}aria-current="true"{% endif %}>EN</a>
+  <a class="language-option {{ 'active' if current_language == 'zh-CN' else '' }}" href="{{ language_url('zh-CN') }}" lang="zh-CN" hreflang="zh-CN" {% if current_language == 'zh-CN' %}aria-current="true"{% endif %}>简体中文</a>
+</nav>

@@ -1,18 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ html_language }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#070b14">
   <meta http-equiv="refresh" content="300">
-  <title>{{ model.name }} · Ollama Cloud Performance</title>
+  <title>{{ model.name }} · {{ t('app.title') }}</title>
   <style>
     :root { color-scheme:dark; --bg:#070b14; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#263247; --accent:#{{ model.color }}; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
     main { width:min(1240px,calc(100% - 32px)); margin:0 auto; padding:36px 0 48px; }
-    .back { display:inline-flex; align-items:center; gap:7px; color:#cbd5e1; text-decoration:none; margin-bottom:24px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:24px; }
+    .back { display:inline-flex; align-items:center; gap:7px; color:#cbd5e1; text-decoration:none; }
     .back:hover { color:#fff; }
+    .topbar-actions { display:flex; align-items:center; gap:10px; min-width:0; }
+    .language-switcher { display:flex; align-items:center; gap:3px; flex:none; padding:3px; border:1px solid #334155; border-radius:10px; background:#0b1220; }
+    .language-option { color:#94a3b8; text-decoration:none; border-radius:7px; padding:4px 8px; font-size:11px; font-weight:700; white-space:nowrap; }
+    .language-option:hover { color:#e2e8f0; background:#172033; }
+    .language-option.active { color:#eff6ff; background:#1d4ed8; }
+    .language-option:focus-visible { outline:2px solid #93c5fd; outline-offset:2px; }
+    .model-switcher { display:flex; align-items:center; gap:8px; min-width:0; padding:5px 7px 5px 10px; border:1px solid #334155; border-radius:10px; background:#0f1725; }
+    .model-switcher::before { content:""; flex:0 0 auto; width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 9px var(--accent); }
+    .model-switcher label { color:#64748b; font-size:10px; font-weight:700; letter-spacing:.055em; text-transform:uppercase; }
+    .model-switcher select { min-width:210px; max-width:290px; border:0; outline:0; background:#0f1725; color:#e2e8f0; padding:4px 24px 4px 4px; font:inherit; font-size:13px; font-weight:650; cursor:pointer; }
+    .model-switcher:focus-within { border-color:#64748b; box-shadow:0 0 0 2px #33415566; }
     header { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; margin-bottom:22px; }
     h1 { display:flex; align-items:center; gap:11px; font-size:clamp(27px,4vw,40px); line-height:1.1; letter-spacing:-.035em; margin:0 0 8px; overflow-wrap:anywhere; }
     h1::before { content:""; flex:0 0 auto; width:9px; height:9px; border-radius:50%; background:var(--accent); box-shadow:0 0 12px var(--accent); }
@@ -62,15 +74,28 @@
     .chart { padding:16px; }
     .chart-head { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:2px 3px 14px; }
     h2 { margin:0; font-size:18px; }
-    .tabs { display:flex; gap:7px; flex-wrap:wrap; }
-    .tabs a { color:#cbd5e1; text-decoration:none; border:1px solid #334155; background:#0b1220; border-radius:8px; padding:5px 9px; font-size:13px; }
-    .tabs a:hover { border-color:var(--accent); }
+    .range-sticky { position:sticky; top:calc(env(safe-area-inset-top,0px) + 8px); z-index:30; display:flex; justify-content:center; margin:18px 0 0; pointer-events:none; }
+    .range-switcher { display:flex; align-items:center; gap:4px; padding:5px; border:1px solid #334155; border-radius:12px; background:rgba(7,11,20,.94); box-shadow:0 10px 28px #0008; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); pointer-events:auto; }
+    .range-label { padding:0 8px; color:#64748b; font-size:11px; font-weight:700; letter-spacing:.055em; text-transform:uppercase; }
+    .range-button { appearance:none; border:1px solid transparent; border-radius:8px; background:transparent; color:#94a3b8; padding:7px 14px; font:inherit; font-size:13px; font-weight:700; cursor:pointer; transition:background .15s ease,border-color .15s ease,color .15s ease; }
+    .range-button:hover { color:#e2e8f0; background:#172033; }
+    .range-button.active { color:#eff6ff; border-color:#3b82f6; background:#1d4ed8; box-shadow:0 2px 10px #1d4ed855; }
+    .range-button:focus-visible { outline:2px solid #93c5fd; outline-offset:2px; }
+    .chart[hidden] { display:none; }
     .graph { display:block; width:100%; height:auto; min-height:170px; border-radius:9px; background:#111827; }
     footer { display:flex; justify-content:space-between; gap:20px; color:#64748b; font-size:12px; margin-top:16px; padding:0 4px; }
     @media (max-width:650px) {
       main { width:min(100% - 20px,1240px); padding-top:22px; }
       header,.chart-head,footer { align-items:flex-start; flex-direction:column; }
+      .topbar { align-items:stretch; flex-direction:column; gap:11px; }
+      .topbar-actions { width:100%; align-items:stretch; flex-direction:column; }
+      .language-switcher { align-self:flex-start; }
+      .model-switcher { width:100%; }
+      .model-switcher select { flex:1; min-width:0; max-width:none; width:100%; }
       .summary { width:100%; }
+      .range-switcher { width:100%; }
+      .range-label { display:none; }
+      .range-button { flex:1; padding-inline:8px; }
       .stats-panel { width:100%; min-width:0; padding:12px 10px 10px; overflow:hidden; }
       .stats-title { margin-bottom:8px; }
       .stats-title p { font-size:10px; }
@@ -94,33 +119,46 @@
 </head>
 <body>
 <main>
-  <a class="back" href="{{ url_for('index') }}">← All models</a>
+  <div class="topbar">
+    <a class="back" href="{{ url_for('index', lang=current_language) }}">{{ t('model.all') }}</a>
+    <div class="topbar-actions">
+      {% include '_language_switcher.html' %}
+      <div class="model-switcher">
+        <label for="model-switch">{{ t('model.label') }}</label>
+        <select id="model-switch" data-model-switch aria-label="{{ t('model.switch') }}">
+          {% for item in all_models %}
+          <option value="{{ url_for('model_detail', model_id=item.ds, lang=current_language) }}" {{ 'selected' if item.ds == model.ds else '' }}>{{ item.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
   <header>
     <div>
       <h1>{{ model.name }}</h1>
       {% if model_info %}
-      <div class="model-facts" aria-label="Ollama model information">
-        {% if model_info.parameter_label %}<span class="fact" title="Parameter count">{{ model_info.parameter_label }}</span>{% endif %}
-        {% if model_info.quantization %}<span class="fact" title="Quantization">{{ model_info.quantization }}</span>{% endif %}
-        {% if model_info.context_length %}<span class="fact" title="Maximum context window">{{ '{:,}'.format(model_info.context_length) }} token context</span>{% endif %}
-        {% for capability in model_info.capabilities %}<span class="capability" title="Model capability">{{ capability }}</span>{% endfor %}
+      <div class="model-facts" aria-label="{{ t('model.information') }}">
+        {% if model_info.parameter_count %}<span class="fact" title="{{ t('model.parameter_count') }}">{{ format_parameter_count_ui(model_info.parameter_count) }}</span>{% endif %}
+        {% if model_info.quantization %}<span class="fact" title="{{ t('model.quantization') }}">{{ model_info.quantization }}</span>{% endif %}
+        {% if model_info.context_length %}<span class="fact" title="{{ t('model.max_context') }}">{{ t('model.token_context', count='{:,.0f}'.format(model_info.context_length)) }}</span>{% endif %}
+        {% for capability in model_info.capabilities %}<span class="capability" title="{{ t('model.capability') }}">{{ capability_label(capability) }}</span>{% endfor %}
       </div>
       {% else %}
-      <div class="model-info-missing">Model information is temporarily unavailable.</div>
+      <div class="model-info-missing">{{ t('model.info_unavailable') }}</div>
       {% endif %}
     </div>
-    <section class="summary" aria-label="Latest result">
+    <section class="summary" aria-label="{{ t('model.latest_result') }}">
       {% if model.ok %}
         <div class="value">{{ '%.1f'|format(model.tps) }}</div>
-        <div class="unit">output tokens / second</div>
-        <div class="detail">{{ model.eval_count }} tokens · {{ '%.2f'|format(model.metric_seconds|default(0)) }}s server · {{ '%.2f'|format(model.wall_seconds) }}s request</div>
+        <div class="unit">{{ t('metrics.output_tokens_second') }}</div>
+        <div class="detail">{{ t('metrics.tokens', count=model.eval_count) }} · {{ t('metrics.server_time', seconds='%.2f'|format(model.metric_seconds|default(0))) }} · {{ t('metrics.request_time', seconds='%.2f'|format(model.wall_seconds)) }}</div>
       {% elif model.error %}
         <div class="value">—</div>
-        <div class="unit">latest probe unavailable</div>
+        <div class="unit">{{ t('status.latest_probe_unavailable') }}</div>
         <div class="error">{{ model.error }}</div>
       {% else %}
         <div class="value">—</div>
-        <div class="unit">awaiting first probe</div>
+        <div class="unit">{{ t('status.awaiting_first_probe') }}</div>
       {% endif %}
     </section>
   </header>
@@ -128,75 +166,89 @@
   <section class="stats-panel" aria-labelledby="stats-heading">
     <div class="stats-title">
       <div>
-        <h2 id="stats-heading">Performance statistics</h2>
-        <p>Calculated live from valid five-minute RRDtool samples.</p>
+        <h2 id="stats-heading">{{ t('stats.title') }}</h2>
+        <p>{{ t('stats.subtitle') }}</p>
       </div>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Range</th>
-            <th>Latest</th>
-            <th>Average</th>
-            <th>Lowest</th>
-            <th>Median <span class="secondary">P50</span></th>
-            <th>P95</th>
-            <th>Highest</th>
-            <th>Std dev</th>
-            <th>Variability <span class="secondary">CV</span></th>
-            <th>Trend</th>
-            <th>Data coverage</th>
+            <th>{{ t('stats.range') }}</th>
+            <th>{{ t('stats.latest') }}</th>
+            <th>{{ t('stats.average') }}</th>
+            <th>{{ t('stats.lowest') }}</th>
+            <th>{{ t('stats.median') }} <span class="secondary">P50</span></th>
+            <th>P05</th>
+            <th>{{ t('stats.highest') }}</th>
+            <th>{{ t('stats.stddev') }}</th>
+            <th>{{ t('stats.variability') }} <span class="secondary">CV</span></th>
+            <th>{{ t('stats.trend') }}</th>
+            <th>{{ t('stats.coverage') }}</th>
           </tr>
         </thead>
         <tbody>
           {% for row in stats %}
           <tr>
-            <td class="period-name" data-label="Range">{{ row.label }}</td>
+            <td class="period-name" data-label="{{ t('stats.range') }}">{{ period_label(row.period) }}</td>
             {% if row.count %}
-              <td data-label="Latest">{{ '%.1f'|format(row.latest) }}</td>
-              <td data-label="Average">{{ '%.1f'|format(row.average) }}</td>
-              <td data-label="Lowest">{{ '%.1f'|format(row.minimum) }}</td>
-              <td data-label="Median / P50">{{ '%.1f'|format(row.median) }}</td>
-              <td data-label="P95">{{ '%.1f'|format(row.p95) }}</td>
-              <td data-label="Highest">{{ '%.1f'|format(row.maximum) }}</td>
-              <td data-label="Std dev">{{ '%.1f'|format(row.stddev) }}</td>
-              <td data-label="Variability / CV">{{ '%.1f'|format(row.cv_pct) }}%</td>
-              <td data-label="Trend" class="{{ 'trend-up' if row.trend_pct is not none and row.trend_pct >= 0 else 'trend-down' }}">
+              <td data-label="{{ t('stats.latest') }}">{{ '%.1f'|format(row.latest) }}</td>
+              <td data-label="{{ t('stats.average') }}">{{ '%.1f'|format(row.average) }}</td>
+              <td data-label="{{ t('stats.lowest') }}">{{ '%.1f'|format(row.minimum) }}</td>
+              <td data-label="{{ t('stats.median') }} / P50">{{ '%.1f'|format(row.median) }}</td>
+              <td data-label="P05">{{ '%.1f'|format(row.p05) }}</td>
+              <td data-label="{{ t('stats.highest') }}">{{ '%.1f'|format(row.maximum) }}</td>
+              <td data-label="{{ t('stats.stddev') }}">{{ '%.1f'|format(row.stddev) }}</td>
+              <td data-label="{{ t('stats.variability') }} / CV">{{ '%.1f'|format(row.cv_pct) }}%</td>
+              <td data-label="{{ t('stats.trend') }}" class="{{ 'trend-up' if row.trend_pct is not none and row.trend_pct >= 0 else 'trend-down' }}">
                 {% if row.trend_pct is not none %}{{ '+' if row.trend_pct >= 0 else '' }}{{ '%.1f'|format(row.trend_pct) }}%{% else %}—{% endif %}
               </td>
-              <td data-label="Data coverage" class="coverage {{ 'coverage-low' if row.coverage_pct < 80 else '' }}">{{ row.count }} samples <span class="secondary">{{ '%.1f'|format(row.coverage_pct) }}%</span></td>
+              <td data-label="{{ t('stats.coverage') }}" class="coverage {{ 'coverage-low' if row.coverage_pct < 80 else '' }}">{{ t('stats.samples', count=row.count) }} <span class="secondary">{{ '%.1f'|format(row.coverage_pct) }}%</span></td>
             {% else %}
-              <td class="no-data" data-label="Status" colspan="10">No samples in this range yet</td>
+              <td class="no-data" data-label="{{ t('stats.status') }}" colspan="10">{{ t('stats.no_samples') }}</td>
             {% endif %}
           </tr>
           {% else %}
-          <tr><td class="no-data" data-label="Status" colspan="11">Statistics are temporarily unavailable</td></tr>
+          <tr><td class="no-data" data-label="{{ t('stats.status') }}" colspan="11">{{ t('stats.unavailable') }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
-    <p class="definitions"><strong>P95</strong>: 95% of measurements are at or below this value. <strong>CV</strong>: standard deviation ÷ average; lower is more stable. <strong>Trend</strong>: second-half average versus first-half average. <strong>Coverage</strong>: valid samples versus all expected five-minute slots in the selected range.</p>
+    <p class="definitions"><strong>P05</strong>: {{ t('stats.p05_definition') }} <strong>CV</strong>: {{ t('stats.cv_definition') }} <strong>{{ t('stats.trend') }}</strong>: {{ t('stats.trend_definition') }} <strong>{{ t('stats.coverage') }}</strong>: {{ t('stats.coverage_definition') }}</p>
   </section>
 
-  {% for period, period_data in periods.items() %}
-  <section class="chart" id="chart-{{ period }}">
-    <div class="chart-head">
-      <h2>{{ period_data[1] }}</h2>
-      <nav class="tabs" aria-label="Chart ranges">
-        {% for link_period, link_data in periods.items() %}<a href="#chart-{{ link_period }}">{{ link_period }}</a>{% endfor %}
-      </nav>
+  <div class="range-sticky">
+    <div class="range-switcher" data-range-switcher role="tablist" aria-label="{{ t('chart.time_range') }}">
+      <span class="range-label" aria-hidden="true">{{ t('chart.range') }}</span>
+      {% for period, period_data in periods.items() %}
+      <button type="button" id="range-{{ period }}" class="range-button {{ 'active' if period == '24h' else '' }}" data-range="{{ period }}" role="tab" aria-controls="chart-{{ period }}" aria-selected="{{ 'true' if period == '24h' else 'false' }}" tabindex="{{ '0' if period == '24h' else '-1' }}">{{ period }}</button>
+      {% endfor %}
     </div>
-    <img class="graph" src="{{ url_for('model_graph', period=period, model_id=model.ds) }}?v={{ cache_key }}" alt="{{ model.name }} throughput for {{ period_data[1] }}">
+  </div>
+
+  {% for period, period_data in periods.items() %}
+  <section class="chart" id="chart-{{ period }}" data-chart-period="{{ period }}" role="tabpanel" aria-labelledby="range-{{ period }}" {% if period != '24h' %}hidden{% endif %}>
+    <div class="chart-head">
+      <h2>{{ period_label(period) }}</h2>
+    </div>
+    <img class="graph" src="{{ url_for('model_graph', period=period, model_id=model.ds, lang=current_language, v=cache_key) }}" alt="{{ t('chart.model_alt', model=model.name, period=period_label(period)) }}">
   </section>
   {% endfor %}
 
   <footer>
-    <span>Last run: {{ updated|default('not run yet',true) }} · refreshes every 5 minutes</span>
-    <span>RRDtool graphs · one benchmark every 5 minutes</span>
+    <span>{{ t('common.last_run', timestamp=format_timestamp(updated)) }} · {{ t('common.refreshes_5m') }}</span>
+    <span>{{ t('footer.model_graphs') }}</span>
   </footer>
 </main>
 <script>
+  const modelSwitch = document.querySelector('[data-model-switch]');
+  if (modelSwitch) {
+    modelSwitch.addEventListener('change', () => {
+      const rangeHash = /^#range-(24h|7d|30d)$/.test(window.location.hash) ? window.location.hash : '';
+      window.location.assign(modelSwitch.value + rangeHash);
+    });
+  }
+
   document.querySelectorAll('.stats-panel table').forEach((table) => {
     let highlighted = [];
     const clearColumn = () => {
@@ -219,5 +271,6 @@
     table.addEventListener('mouseleave', clearColumn);
   });
 </script>
+<script src="{{ url_for('static', filename='chart-range.js') }}"></script>
 </body>
 </html>

@@ -19,7 +19,9 @@ from typing import Any, Iterator
 
 import click
 import requests
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, g, jsonify, render_template, request, url_for
+
+from translations import DEFAULT_LANGUAGE, normalize_language, translate
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("MONITOR_DATA_DIR", BASE_DIR / "data"))
@@ -179,6 +181,31 @@ def format_parameter_count(value: Any) -> str | None:
         amount = f"{count / 1_000_000:.1f}".rstrip("0").rstrip(".")
         return f"{amount}M parameters"
     return f"{count:,} parameters"
+
+
+def localized_parameter_count(value: Any, language: str) -> str | None:
+    """Format a model parameter count for the active UI language."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    if count >= 1_000_000_000:
+        amount = f"{count / 1_000_000_000:.1f}".rstrip("0").rstrip(".") + "B"
+    elif count >= 1_000_000:
+        amount = f"{count / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    else:
+        amount = f"{count:,}"
+    return translate(language, "model.parameter_count_value", value=amount)
+
+
+def localized_capability(value: Any, language: str) -> str:
+    """Translate known Ollama capability labels and preserve unknown values."""
+    capability = str(value)
+    key = f"capability.{capability.lower()}"
+    translated = translate(language, key)
+    return capability if translated == key else translated
 
 
 def model_info_value(model_info: dict[str, Any], suffix: str) -> Any:
@@ -631,15 +658,20 @@ def save_summary(snapshot: dict[str, Any], text: str, payload: dict[str, Any], w
         return int(cursor.lastrowid)
 
 
-def format_utc_timestamp(value: str) -> str:
+def format_utc_timestamp(value: str, language: str = DEFAULT_LANGUAGE) -> str:
+    """Format an ISO timestamp for the selected UI language."""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.astimezone(timezone.utc).strftime("%b %d, %Y · %H:%M UTC")
-    except (TypeError, ValueError):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        if language == "zh-CN":
+            return f"{parsed.year}年{parsed.month}月{parsed.day}日 · {parsed:%H:%M} UTC"
+        return parsed.strftime("%b %d, %Y · %H:%M UTC")
+    except (AttributeError, TypeError, ValueError):
         return value
 
 
-def list_summaries(limit: int = 24, offset: int = 0) -> list[dict[str, Any]]:
+def list_summaries(
+    limit: int = 24, offset: int = 0, language: str = DEFAULT_LANGUAGE
+) -> list[dict[str, Any]]:
     """Read newest summary history for the web feed or CLI."""
     init_summary_db()
     safe_limit = max(1, min(int(limit), 500))
@@ -658,10 +690,11 @@ def list_summaries(limit: int = 24, offset: int = 0) -> list[dict[str, Any]]:
         ).fetchall()
     items = [dict(row) for row in rows]
     for item in items:
-        item["generated_label"] = format_utc_timestamp(item["generated_at"])
+        item["generated_label"] = format_utc_timestamp(item["generated_at"], language)
+        separator = " 至 " if language == "zh-CN" else " to "
         item["period_label"] = (
-            f"{format_utc_timestamp(item['period_start'])} to "
-            f"{format_utc_timestamp(item['period_end'])}"
+            f"{format_utc_timestamp(item['period_start'], language)}{separator}"
+            f"{format_utc_timestamp(item['period_end'], language)}"
         )
     return items
 
@@ -715,7 +748,9 @@ def generate_hourly_summary() -> dict[str, Any]:
         }
 
 
-def make_graph(period: str, selected_ds: str | None = None) -> bytes:
+def make_graph(
+    period: str, selected_ds: str | None = None, language: str = DEFAULT_LANGUAGE
+) -> bytes:
     """Render a PNG through RRDtool's rrdgraph implementation."""
     if period not in PERIODS:
         raise ValueError("invalid graph period")
@@ -725,12 +760,14 @@ def make_graph(period: str, selected_ds: str | None = None) -> bytes:
         if not graph_models:
             raise ValueError("invalid model")
     ensure_rrd()
-    start, label = PERIODS[period]
-    graph_title = (
-        f"{graph_models[0]['name']} throughput — {label}"
-        if selected_ds
-        else f"Ollama Cloud throughput — {label}"
+    start = PERIODS[period][0]
+    period_name = translate(language, f"period.{period}")
+    graph_title = translate(
+        language,
+        "chart.model_title" if selected_ds else "chart.all_title",
+        **({"model": graph_models[0]["name"], "period": period_name} if selected_ds else {"period": period_name}),
     )
+    graph_font = "WenQuanYi Zen Hei" if language == "zh-CN" else "DejaVu Sans"
     args = [
         "graph",
         "-",
@@ -747,7 +784,7 @@ def make_graph(period: str, selected_ds: str | None = None) -> bytes:
         "--title",
         graph_title,
         "--vertical-label",
-        "output tokens / second",
+        translate(language, "chart.vertical_label"),
         "--lower-limit",
         "0",
         "--alt-autoscale-max",
@@ -755,7 +792,7 @@ def make_graph(period: str, selected_ds: str | None = None) -> bytes:
         "--border",
         "0",
         "--font",
-        "DEFAULT:0:DejaVu Sans",
+        f"DEFAULT:0:{graph_font}",
         "--color",
         "BACK#111827",
         "--color",
@@ -783,9 +820,9 @@ def make_graph(period: str, selected_ds: str | None = None) -> bytes:
         args.extend(
             [
                 f"LINE2:{ds}#{model['color']}:{escaped_name}",
-                f"GPRINT:{ds}:LAST:Last\\: %6.1lf",
-                f"GPRINT:{ds}:AVERAGE:Avg\\: %6.1lf",
-                f"GPRINT:{ds}:MAX:Max\\: %6.1lf\\l",
+                f"GPRINT:{ds}:LAST:{translate(language, 'chart.legend_last')}\\: %6.1lf",
+                f"GPRINT:{ds}:AVERAGE:{translate(language, 'chart.legend_average')}\\: %6.1lf",
+                f"GPRINT:{ds}:MAX:{translate(language, 'chart.legend_maximum')}\\: %6.1lf\\l",
             ]
         )
     return run_rrd(*args, capture=True).stdout
@@ -793,6 +830,79 @@ def make_graph(period: str, selected_ds: str | None = None) -> bytes:
 
 def create_app() -> Flask:
     app = Flask(__name__)
+
+    @app.before_request
+    def select_ui_language() -> None:
+        """Select a locale from the URL, saved preference, or browser headers."""
+        requested = normalize_language(request.args.get("lang"))
+        saved = normalize_language(request.cookies.get("ollama_monitor_language"))
+        accepted = next(
+            (
+                locale
+                for browser_language, quality in request.accept_languages
+                if quality > 0 and (locale := normalize_language(browser_language)) is not None
+            ),
+            None,
+        )
+        g.language = requested or saved or accepted or DEFAULT_LANGUAGE
+
+    @app.after_request
+    def apply_language_response(response: Response) -> Response:
+        if response.mimetype in {"text/html", "image/png"}:
+            response.headers["Content-Language"] = g.get("language", DEFAULT_LANGUAGE)
+            response.vary.add("Accept-Language")
+            response.vary.add("Cookie")
+        requested = normalize_language(request.args.get("lang"))
+        if requested and response.mimetype == "text/html":
+            response.set_cookie(
+                "ollama_monitor_language",
+                requested,
+                max_age=31_536_000,
+                secure=request.is_secure,
+                httponly=True,
+                samesite="Lax",
+            )
+        return response
+
+    def language_url(language: str) -> str:
+        """Build a locale switch URL while retaining this page and its query state."""
+        locale = normalize_language(language) or DEFAULT_LANGUAGE
+        values = request.args.to_dict(flat=True)
+        values["lang"] = locale
+        values.update(request.view_args or {})
+        return url_for(request.endpoint or "index", **values)
+
+    @app.context_processor
+    def inject_i18n() -> dict[str, Any]:
+        language = g.get("language", DEFAULT_LANGUAGE)
+        return {
+            "current_language": language,
+            "html_language": language,
+            "language_url": language_url,
+            "t": lambda key, **values: translate(language, key, **values),
+            "period_label": lambda period: translate(language, f"period.{period}"),
+            "format_timestamp": lambda value: format_utc_timestamp(value, language) if value else translate(language, "common.not_run_yet"),
+            "format_parameter_count_ui": lambda value: localized_parameter_count(value, language),
+            "capability_label": lambda value: localized_capability(value, language),
+        }
+
+    @app.errorhandler(404)
+    def page_not_found(_error: Exception) -> tuple[str, int]:
+        return render_template(
+            "error.html",
+            status_code=404,
+            error_title=translate(g.language, "error.not_found"),
+            error_message=translate(g.language, "error.not_found_message"),
+        ), 404
+
+    @app.errorhandler(500)
+    def internal_server_error(_error: Exception) -> tuple[str, int]:
+        return render_template(
+            "error.html",
+            status_code=500,
+            error_title=translate(g.language, "error.server"),
+            error_message=translate(g.language, "error.server_message"),
+        ), 500
 
     @app.get("/")
     def index() -> str:
@@ -802,7 +912,7 @@ def create_app() -> Flask:
         for model in MODELS:
             display_models.append({**model, **status.get("models", {}).get(model["name"], {})})
         cache_key = int(STATUS_PATH.stat().st_mtime) if STATUS_PATH.exists() else 0
-        summary_feed = list_summaries(1)
+        summary_feed = list_summaries(1, language=g.language)
         return render_template(
             "index.html",
             models=display_models,
@@ -822,7 +932,7 @@ def create_app() -> Flask:
         total_pages = max(1, math.ceil(total / per_page))
         if page > total_pages:
             abort(404)
-        feed = list_summaries(per_page, (page - 1) * per_page)
+        feed = list_summaries(per_page, (page - 1) * per_page, g.language)
         return render_template(
             "insights.html",
             summaries=feed,
@@ -850,6 +960,7 @@ def create_app() -> Flask:
         return render_template(
             "model.html",
             model=display_model,
+            all_models=MODELS,
             model_info=basic_info,
             model_info_fetched_at=model_info_cache.get("fetched_at"),
             status=status,
@@ -864,7 +975,7 @@ def create_app() -> Flask:
         if period not in PERIODS or not any(item["ds"] == model_id for item in MODELS):
             return Response("Unknown graph or model\n", status=404, mimetype="text/plain")
         try:
-            png = make_graph(period, model_id)
+            png = make_graph(period, model_id, g.language)
         except subprocess.CalledProcessError as exc:
             detail = exc.stderr.decode(errors="replace")[:500]
             app.logger.error("model rrdgraph failed: %s", detail)
@@ -880,7 +991,7 @@ def create_app() -> Flask:
         if period not in PERIODS:
             return Response("Unknown graph period\n", status=404, mimetype="text/plain")
         try:
-            png = make_graph(period)
+            png = make_graph(period, language=g.language)
         except subprocess.CalledProcessError as exc:
             detail = exc.stderr.decode(errors="replace")[:500]
             app.logger.error("rrdgraph failed: %s", detail)

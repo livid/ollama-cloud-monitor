@@ -36,3 +36,7 @@ Manual commands:
 .venv/bin/python monitor.py summarize
 .venv/bin/python monitor.py summary-history --limit 10
 ```
+
+## UI languages
+
+The dashboard UI is available in English and Simplified Chinese. Use the language switcher on any page, or set `?lang=en` / `?lang=zh-CN` directly. The selection is carried through dashboard links and saved in a one-year cookie; first-time visitors are matched against `Accept-Language`. RRDtool chart titles, axes, and legends are localized too. Chinese graph rendering uses the `fonts-wqy-zenhei` system package.

@@ -39,6 +39,7 @@ MODELS = [
     {"name": "gemma4:31b", "ds": "gemma4_31b", "color": "7C3AED"},
     {"name": "minimax-m3", "ds": "minimax_m3", "color": "06B6D4"},
     {"name": "glm-5.2", "ds": "glm_5_2", "color": "22C55E"},
+    {"name": "glm-5.3-flash", "ds": "glm_5_3_flash", "color": "3B82F6"},
     {"name": "deepseek-v4-pro", "ds": "dsv4_pro", "color": "F59E0B"},
     {"name": "deepseek-v4-flash", "ds": "dsv4_flash", "color": "EF4444"},
     {"name": "nemotron-3-ultra", "ds": "nemotron3", "color": "EC4899"},
@@ -329,7 +330,14 @@ def update_rrd(results: dict[str, dict[str, Any]]) -> int:
         result = results.get(model["name"], {})
         value = result.get("tps")
         values.append("U" if value is None else f"{float(value):.6f}")
-    run_rrd("update", str(RRD_PATH), f"{timestamp}:{':'.join(values)}")
+    template = ":".join(model["ds"] for model in MODELS)
+    run_rrd(
+        "update",
+        str(RRD_PATH),
+        "--template",
+        template,
+        f"{timestamp}:{':'.join(values)}",
+    )
     return timestamp
 
 

@@ -79,7 +79,7 @@
     </div>
     <div class="header-actions">
       {% include '_language_switcher.html' %}
-      <div class="badge"><span class="dot {{ status.state|default('waiting') }}"></span>{{ t('dashboard.models_online', online=status.success_count|default(0), total=status.model_count|default(6)) }}</div>
+      <div class="badge"><span class="dot {{ status.state|default('waiting') }}"></span>{{ t('dashboard.models_online', online=status.success_count|default(0), total=status.model_count|default(models|length)) }}</div>
     </div>
   </header>
 

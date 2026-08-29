@@ -28,7 +28,9 @@
     .insight:last-child { border-bottom:0; }
     .insight-time { color:#cbd5e1; font-size:12px; font-weight:650; }
     .insight-window { color:#64748b; font-size:11px; margin-top:6px; }
-    .insight p { margin:0; color:#dbe4f0; line-height:1.7; }
+    .insight p, .insight-list { margin:0; color:#dbe4f0; line-height:1.7; }
+    .insight-list { padding-left:1.25rem; }
+    .insight-list li + li { margin-top:.45rem; }
     .empty { color:var(--muted); padding:28px 20px; }
     .pagination { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:16px; }
     .page-link { color:#cbd5e1; text-decoration:none; border:1px solid #334155; background:#0f1725; border-radius:8px; padding:7px 11px; }
@@ -62,7 +64,15 @@
         <time class="insight-time" datetime="{{ item.generated_at }}">{{ item.generated_label }}</time>
         <div class="insight-window" title="{{ item.period_label }}">{{ t('insights.four_hour_window') }} · {{ t('insights.points', count=item.valid_point_count) }} · {{ t('insights.coverage', percentage='%.1f'|format(item.coverage_pct)) }}</div>
       </div>
+      {% if item.summary_items %}
+      <ul class="insight-list">
+        {% for summary_item in item.summary_items %}
+        <li>{{ summary_item }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
       <p>{{ item.summary }}</p>
+      {% endif %}
     </article>
     {% else %}
     <div class="empty">{{ t('insights.none') }}</div>

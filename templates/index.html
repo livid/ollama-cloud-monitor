@@ -41,7 +41,9 @@
     .insight:last-child { border-bottom:0; }
     .insight-time { color:#cbd5e1; font-size:12px; font-weight:650; }
     .insight-window { color:#64748b; font-size:11px; margin-top:5px; }
-    .insight p { margin:0; color:#dbe4f0; line-height:1.65; }
+    .insight p, .insight-list { margin:0; color:#dbe4f0; line-height:1.65; }
+    .insight-list { padding-left:1.25rem; }
+    .insight-list li + li { margin-top:.42rem; }
     .feed-empty { color:var(--muted); padding:22px 3px 8px; }
     .feed-link { color:#86efac; font-size:12px; text-decoration:none; }
     .feed-link:hover { text-decoration:underline; }
@@ -121,7 +123,15 @@
           <time class="insight-time" datetime="{{ item.generated_at }}">{{ item.generated_label }}</time>
           <div class="insight-window" title="{{ item.period_label }}">{{ t('insights.four_hour_window') }} · {{ t('insights.points', count=item.valid_point_count) }} · {{ t('insights.coverage', percentage='%.1f'|format(item.coverage_pct)) }}</div>
         </div>
+        {% if item.summary_items %}
+        <ul class="insight-list">
+          {% for summary_item in item.summary_items %}
+          <li>{{ summary_item }}</li>
+          {% endfor %}
+        </ul>
+        {% else %}
         <p>{{ item.summary }}</p>
+        {% endif %}
       </article>
       {% endfor %}
     </div>

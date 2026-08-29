@@ -53,7 +53,9 @@ PERIODS = {
     "30d": ("end-30d", "Last 30 days"),
 }
 PERIOD_SECONDS = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000}
-SUMMARY_MODEL = "glm-5.2"
+SUMMARY_MODEL = "glm-5.3"
+SUMMARY_THINK_LEVEL = "high"
+SUMMARY_NUM_PREDICT = 4096
 SUMMARY_WINDOW_SECONDS = 4 * 60 * 60
 SUMMARY_EXPECTED_SAMPLES = SUMMARY_WINDOW_SECONDS // 300
 
@@ -627,6 +629,7 @@ def call_ollama_text(
     *,
     temperature: float,
     num_predict: int,
+    think: bool | str = False,
     session: requests.Session | None = None,
 ) -> tuple[str, dict[str, Any], float]:
     """Run one non-streaming text generation through the configured Ollama backend."""
@@ -639,7 +642,7 @@ def call_ollama_text(
             "model": SUMMARY_MODEL,
             "prompt": prompt,
             "stream": False,
-            "think": False,
+            "think": think,
             "options": {"temperature": temperature, "num_predict": num_predict},
         },
         timeout=(20, 900),
@@ -676,7 +679,8 @@ def translate_summary_to_chinese(
         summary_translation_prompt(english_text),
         "summary translation",
         temperature=0,
-        num_predict=400,
+        num_predict=SUMMARY_NUM_PREDICT,
+        think=SUMMARY_THINK_LEVEL,
         session=session,
     )
     if not any("\u4e00" <= character <= "\u9fff" for character in chinese_text):
@@ -934,7 +938,8 @@ def generate_hourly_summary() -> dict[str, Any]:
             summary_prompt(snapshot),
             "summary generation",
             temperature=0.2,
-            num_predict=300,
+            num_predict=SUMMARY_NUM_PREDICT,
+            think=SUMMARY_THINK_LEVEL,
             session=session,
         )
         chinese_text, translation_payload, translation_wall_seconds = (

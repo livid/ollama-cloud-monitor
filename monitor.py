@@ -39,6 +39,7 @@ MODELS = [
     {"name": "gemma4:31b", "ds": "gemma4_31b", "color": "7C3AED"},
     {"name": "minimax-m3", "ds": "minimax_m3", "color": "06B6D4"},
     {"name": "glm-5.2", "ds": "glm_5_2", "color": "22C55E"},
+    {"name": "glm-5.3", "ds": "glm_5_3", "color": "14B8A6"},
     {"name": "glm-5.3-flash", "ds": "glm_5_3_flash", "color": "3B82F6"},
     {"name": "deepseek-v4-pro", "ds": "dsv4_pro", "color": "F59E0B"},
     {"name": "deepseek-v4-flash", "ds": "dsv4_flash", "color": "EF4444"},

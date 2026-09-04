@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#070b14">
   {% include '_favicon.html' %}
-  <meta http-equiv="refresh" content="300">
+  <meta http-equiv="refresh" content="1200">
   <title>{{ t('app.title') }}</title>
   <style>
     :root { color-scheme: dark; --bg:#070b14; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#263247; }
@@ -160,7 +160,7 @@
   {% endfor %}
 
   <footer>
-    <span>{{ t('common.last_run', timestamp=format_timestamp(updated)) }} · {{ t('common.refreshes_5m') }}</span>
+    <span>{{ t('common.last_run', timestamp=format_timestamp(updated)) }} · {{ t('common.refreshes_20m') }}</span>
     <span>{{ t('footer.dashboard_graphs') }} · <a href="{{ url_for('api_status') }}">{{ t('footer.json_status') }}</a></span>
   </footer>
 </main>

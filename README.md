@@ -1,6 +1,6 @@
 # Ollama Cloud Performance Monitor
 
-A Flask dashboard and Click CLI that benchmarks Ollama Cloud models every 5 minutes and stores server-reported output-token throughput in an RRDtool database.
+A Flask dashboard and Click CLI that benchmarks Ollama Cloud models every 20 minutes and stores server-reported output-token throughput in an RRDtool database.
 
 ## CLI
 
@@ -14,7 +14,7 @@ cd /home/dev/ollama-cloud-monitor
 .venv/bin/python monitor.py status
 ```
 
-The API key is loaded from `/etc/ollama-cloud-monitor.env`; it is not stored in the source tree or crontab. The web process runs under systemd as `ollama-cloud-monitor.service`. A user crontab executes `bin/scheduled-probe` every 5 minutes.
+The API key is loaded from `/etc/ollama-cloud-monitor.env`; it is not stored in the source tree or crontab. The web process runs under systemd as `ollama-cloud-monitor.service`. A user crontab executes `bin/scheduled-probe` every 20 minutes.
 
 Throughput uses Ollama's `eval_count` divided by `eval_duration` when available. Ollama Cloud currently supplies `total_duration` instead, so the monitor uses server-side end-to-end duration (network time is excluded).
 
@@ -28,7 +28,7 @@ Model detail pages display architecture, parameter count, quantization, context 
 
 ## Hourly AI insight feed
 
-At minute 3 of every hour, `bin/hourly-summary` fetches the previous four hours of five-minute RRD samples for all eight models and asks Ollama Cloud `glm-5.3` for a concise, data-grounded three-item English operational list with its reasoning level set to `high`. The same high-reasoning backend immediately translates that list into Simplified Chinese while preserving its structure, and both versions are saved atomically. Summaries and aggregate source metadata are retained in `data/summaries.sqlite3`; the dashboard displays the version matching the active UI language as an HTML list, `/insights` provides the paginated full feed, and `/api/summaries` returns both versions for the newest 100.
+At minute 3 of every hour, `bin/hourly-summary` fetches the previous four hours of twenty-minute RRD samples for all eight models and asks Ollama Cloud `glm-5.3` for a concise, data-grounded three-item English operational list with its reasoning level set to `high`. The same high-reasoning backend immediately translates that list into Simplified Chinese while preserving its structure, and both versions are saved atomically. Summaries and aggregate source metadata are retained in `data/summaries.sqlite3`; the dashboard displays the version matching the active UI language as an HTML list, `/insights` provides the paginated full feed, and `/api/summaries` returns both versions for the newest 100.
 
 Manual commands:
 

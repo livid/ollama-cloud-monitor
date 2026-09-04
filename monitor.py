@@ -53,12 +53,16 @@ PERIODS = {
     "30d": ("end-30d", "Last 30 days"),
 }
 PERIOD_SECONDS = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000}
+MONITOR_INTERVAL_SECONDS = 20 * 60
+RRD_STEP_SECONDS = MONITOR_INTERVAL_SECONDS
+# Match the previous three-interval tolerance for delayed or missed probes.
+RRD_HEARTBEAT_SECONDS = 3 * RRD_STEP_SECONDS
 SUMMARY_MODEL = "glm-5.3"
 SUMMARY_THINK_LEVEL = "high"
 SUMMARY_NUM_PREDICT = 4096
 SUMMARY_LIST_ITEM_COUNT = 3
 SUMMARY_WINDOW_SECONDS = 4 * 60 * 60
-SUMMARY_EXPECTED_SAMPLES = SUMMARY_WINDOW_SECONDS // 300
+SUMMARY_EXPECTED_SAMPLES = SUMMARY_WINDOW_SECONDS // RRD_STEP_SECONDS
 
 PROMPT = (
     "In 100 to 120 words, explain why reproducible performance benchmarks "
@@ -83,28 +87,39 @@ def run_rrd(
 
 
 def ensure_rrd() -> None:
-    """Create the five-minute-step round-robin database if it does not exist."""
+    """Create the twenty-minute-step round-robin database if it does not exist."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if RRD_PATH.exists():
         return
 
-    args = ["create", str(RRD_PATH), "--step", "300", "--start", "now-10s"]
+    args = [
+        "create",
+        str(RRD_PATH),
+        "--step",
+        str(RRD_STEP_SECONDS),
+        "--start",
+        "now-10s",
+    ]
     args.extend(
-        f"DS:{model['ds']}:GAUGE:900:0:U" for model in MODELS
+        f"DS:{model['ds']}:GAUGE:{RRD_HEARTBEAT_SECONDS}:0:U" for model in MODELS
     )
-    # Five-minute detail for 31 days, hourly averages for a year,
+    # Twenty-minute detail for 31 days, hourly averages for a year,
     # six-hour averages for a year, and daily averages for two years.
+    detail_rows = 31 * 24 * 60 * 60 // RRD_STEP_SECONDS
+    hourly_steps = 60 * 60 // RRD_STEP_SECONDS
+    six_hour_steps = 6 * 60 * 60 // RRD_STEP_SECONDS
+    daily_steps = 24 * 60 * 60 // RRD_STEP_SECONDS
     args.extend(
         [
-            "RRA:LAST:0.5:1:8928",
-            "RRA:AVERAGE:0.5:1:8928",
-            "RRA:MAX:0.5:1:8928",
-            "RRA:AVERAGE:0.5:12:8784",
-            "RRA:MAX:0.5:12:8784",
-            "RRA:AVERAGE:0.5:72:1464",
-            "RRA:MAX:0.5:72:1464",
-            "RRA:AVERAGE:0.5:288:732",
-            "RRA:MAX:0.5:288:732",
+            f"RRA:LAST:0.5:1:{detail_rows}",
+            f"RRA:AVERAGE:0.5:1:{detail_rows}",
+            f"RRA:MAX:0.5:1:{detail_rows}",
+            f"RRA:AVERAGE:0.5:{hourly_steps}:8784",
+            f"RRA:MAX:0.5:{hourly_steps}:8784",
+            f"RRA:AVERAGE:0.5:{six_hour_steps}:1464",
+            f"RRA:MAX:0.5:{six_hour_steps}:1464",
+            f"RRA:AVERAGE:0.5:{daily_steps}:732",
+            f"RRA:MAX:0.5:{daily_steps}:732",
         ]
     )
     run_rrd(*args)
@@ -403,7 +418,7 @@ def percentile(values: list[float], percentile_value: float) -> float | None:
 
 
 def fetch_model_values(model_ds: str, period: str) -> list[float]:
-    """Fetch finite five-minute AVERAGE values for one model from RRDtool."""
+    """Fetch finite twenty-minute AVERAGE values for one model from RRDtool."""
     if model_ds not in {model["ds"] for model in MODELS} or period not in PERIODS:
         raise ValueError("invalid model or period")
     ensure_rrd()
@@ -416,7 +431,7 @@ def fetch_model_values(model_ds: str, period: str) -> list[float]:
         "--end",
         "now",
         "--resolution",
-        "300",
+        str(RRD_STEP_SECONDS),
         capture=True,
     ).stdout.decode(errors="replace")
 
@@ -448,7 +463,7 @@ def fetch_model_values(model_ds: str, period: str) -> list[float]:
 def calculate_period_stats(model_ds: str, period: str) -> dict[str, Any]:
     """Calculate descriptive and operational statistics for a graph range."""
     values = fetch_model_values(model_ds, period)
-    expected_samples = PERIOD_SECONDS[period] // 300
+    expected_samples = PERIOD_SECONDS[period] // RRD_STEP_SECONDS
     count = len(values)
     if not values:
         return {
@@ -491,7 +506,7 @@ def get_model_stats(model_ds: str) -> list[dict[str, Any]]:
 
 
 def fetch_summary_snapshot() -> dict[str, Any]:
-    """Fetch aligned five-minute values for all models over the last four hours."""
+    """Fetch aligned twenty-minute values for all models over the last four hours."""
     ensure_rrd()
     period_end = int(time.time())
     period_start = period_end - SUMMARY_WINDOW_SECONDS
@@ -504,7 +519,7 @@ def fetch_summary_snapshot() -> dict[str, Any]:
         "--end",
         str(period_end),
         "--resolution",
-        "300",
+        str(RRD_STEP_SECONDS),
         capture=True,
     ).stdout.decode(errors="replace")
     lines = [line for line in output.splitlines() if line.strip()]
@@ -582,7 +597,7 @@ def fetch_summary_snapshot() -> dict[str, Any]:
     return {
         "period_start": datetime.fromtimestamp(period_start, timezone.utc).isoformat(),
         "period_end": datetime.fromtimestamp(period_end, timezone.utc).isoformat(),
-        "interval_minutes": 5,
+        "interval_minutes": MONITOR_INTERVAL_SECONDS // 60,
         "expected_samples_per_model": SUMMARY_EXPECTED_SAMPLES,
         "valid_point_count": valid_point_count,
         "coverage_pct": round(
@@ -627,7 +642,7 @@ def summary_prompt(snapshot: dict[str, Any]) -> str:
         "Do not add a title, nested list, generic benchmarking advice, unsupported explanations, or "
         "claims of statistical significance. Use no formatting except the three '- ' list markers. "
         "Check every sample-count and percentage statement directly against the JSON. Do not mention "
-        "analysis instructions or sample thresholds. The points arrays are ordered five-minute "
+        "analysis instructions or sample thresholds. The points arrays are ordered twenty-minute "
         "observations in UTC and the calculated fields are provided for verification.\n\n"
         f"DATASET:\n{json.dumps(snapshot, separators=(',', ':'))}"
     )
@@ -1233,7 +1248,7 @@ def create_app() -> Flask:
         return Response(
             png,
             mimetype="image/png",
-            headers={"Cache-Control": "public, max-age=300"},
+            headers={"Cache-Control": f"public, max-age={MONITOR_INTERVAL_SECONDS}"},
         )
 
     @app.get("/graph/<period>.png")
@@ -1249,7 +1264,7 @@ def create_app() -> Flask:
         return Response(
             png,
             mimetype="image/png",
-            headers={"Cache-Control": "public, max-age=300"},
+            headers={"Cache-Control": f"public, max-age={MONITOR_INTERVAL_SECONDS}"},
         )
 
     @app.get("/api/summaries")
